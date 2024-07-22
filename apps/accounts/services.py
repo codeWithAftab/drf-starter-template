@@ -1,113 +1,106 @@
+# local modules.
 from .models import *
 from exceptions.restapi import CustomAPIException
-from firebase_admin.auth import UserRecord
+from .queries import *
+from apps.accounts.decorators import manager_role_required
 
-class CustomUserManager:
-    def __init__(self, uid=None):
-        self.uid = uid
-        
-    def create_user(self, firebase_user: UserRecord, **validated_data):
-        if not firebase_user.email:
-            email = f"{self.uid}@placeholder.com"
-        else:
-            email = firebase_user.email
+def create_user(*, email: str, password: str, **validated_data) -> CustomUser:
+    """
+    Create a new user with the given email and password.
 
-        try:
-            user = CustomUser.objects.create(uid=firebase_user.uid,
-                                             phone_number=firebase_user.phone_number,
-                                                email=email
-                                             )
-        except Exception as e:
-            print("error")
-            raise CustomAPIException(error_code="UserAlreadyExist")
-        
-        return self.update_user(**validated_data)
+    Args:
+        email (str): The email address of the new user.
+        password (str): The password for the new user.
+        **validated_data: Additional validated data to create the user.
 
-    def create_guest_user(self, **validated_data):                                                                       
-        email = f"{self.uid}-guest@placeholder.com"
-        device_id = validated_data["device_id"]
-        try:
-            user = CustomUser.objects.create(uid=self.uid, is_guest=True, email=email)
-        except Exception as e:
-            raise CustomAPIException(detail=str(e), error_code="UserAlreadyExist")
+    Returns:
+        CustomUser: The newly created user object.
+
+    Raises:
+        CustomAPIException: If a user with the given email already exists.
+    """
+    user = get_user_by_email(email=email)
+
+    if user:
+        raise CustomAPIException( error_code="EmailAlreadyExist")
+
+    user = CustomUser.objects.create(email=email, **validated_data)
+    user.set_password(password)
+    user.save()
+
+    return user
+
+
+def update_user(*, user: CustomUser, **validated_data) -> CustomUser:
+    """
+    Update an existing user with the given validated data.
+
+    Args:
+        user (CustomUser): The user object to update.
+        **validated_data: The fields and values to update the user with.
+
+    Returns:
+        CustomUser: The updated user object.
+
+    Raises:
+        None
+    """
+    for field, value in validated_data.items():
+        setattr(user, field, value)
+
+    user.save()
+
+    return user
+
+
+@manager_role_required
+def create_staff_member(*,
+                        manager: CustomUser,
+                        email: str,
+                        password: str,
+                        role: str = "staff",
+                        **validated_data) -> StaffMember:
+    """
+    Create a new staff member by a user with the manager role.
+
+    Args:
+        manager (CustomUser): The manager creating the staff member.
+        email (str): The email address of the new staff member.
+        password (str): The password for the new staff member.
+        role (int): The role of the new staff member, default is 1 (Staff).
+        employee_id (str): The employee ID of the new staff member.
+        **validated_data: Additional validated data to create the user.
+
+    Returns:
+        StaffMember: The newly created staff member object.
+
+    Raises:
+        CustomAPIException: If a user with the given email already exists.
+    """
+    user = create_user(email=email, password=password, role=role, **validated_data)
+    staff_member = StaffMember(user=user)
+    staff_member.save()
+
+    return staff_member
+
+@manager_role_required
+def update_staff_member_details(*, 
+                                manager: CustomUser, 
+                                employee_id: str,
+                                **validated_data) -> CustomUser:
+    staff_member = get_staff_member_by_id(employee_id=employee_id)
+    if not staff_member:
+        raise CustomAPIException(error_code="WrongEmployeeId")
     
-        if self._is_device_valid_for_guest_user(device_id=device_id):
-            self._add_user_to_device(user=user, device_id=device_id)
-            
-        else:
-            raise CustomAPIException(error_code="GuestUserLoginLimitExceed")
+    for field, value in validated_data.items():
+        setattr(staff_member.user, field, value)
 
-        return user
-       
-    def update_user(self, **update_fields):
-        user = CustomUser.objects.get(uid=self.uid)
-        print(update_fields)
-        for field , value in update_fields.items():
-            if field != "id" and  value != "":
-                setattr(user, field, value)
+    staff_member.user.save()
 
-        print(update_fields)
-        user.save()
+    return staff_member
 
-      
-        device_id = update_fields.get("device_id")
-        if device_id:
-            fcm_token = update_fields.get("fcm_token")
-            self._add_user_to_device(user=user, device_id=device_id, fcm_token=fcm_token)
 
-        return user
-
-    def device_eligible_for_guest_user(self, device_id, **kwargs):
-        """This method is return True if the device is valid for Guest user.
-            Other wise False
-        Keyword device_id:
-        argument -- description
-        Return: Return True if valid device.
-        """
-        
-        if self._is_device_valid_for_guest_user(device_id=device_id):
-            return True
-        
-        return False        
-    
-    def _add_device(self, user, device_id, fcm_token=None):
-        try:
-            device = Device.objects.get(device_id=device_id)
-            device.user = user
-            fcm_token = fcm_token
-            device.save()
-            return device
-
-        except:
-            return Device.objects.create(device_id=device_id, user=user, fcm_token=fcm_token)
-        
-    def _add_user_to_device(self, user, device_id, fcm_token=None):
-        try:
-            device = Device.objects.get(device_id=device_id)
-            device.users.add(user)
-            device.fcm_token = fcm_token
-            device.save()
-            return device
-
-        except:
-            device = Device.objects.create(device_id=device_id, fcm_token=fcm_token)
-            if not user in device.users.all():
-                device.users.add(user)
-                
-            return device
-
-    def _is_device_valid_for_guest_user(self, device_id):
-        device = Device.objects.filter(device_id=device_id).first()
-        if device:
-            device_creation_time = device.created_on  # Assuming this is timezone-aware
-            current_time = timezone.now()  # Get the current time in the same timezone
-            time_in_72_hours = device_creation_time + timedelta(hours=72)
-
-            if time_in_72_hours > current_time:
-                return True
-            
-            else:
-                return False
-        
-        # if device not exist then simply create device
-        return True
+@manager_role_required
+def get_all_staff_members(manager: CustomUser):
+    staff_members = StaffMember.objects.all()
+    return staff_members

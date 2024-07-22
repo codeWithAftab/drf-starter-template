@@ -14,6 +14,7 @@ class ErrorSerializer(serializers.ModelSerializer):
 def custom_exception_handler(exc, context):
     # Call the default exception handler first  
     response = exception_handler(exc, context)
+    print("error response", response)
     if response is not None:
         error_field = exc.__dict__.get("error")
         print(exc.__dict__)
@@ -36,10 +37,14 @@ class CustomAPIException(APIException):
         super().__init__(detail, code)
         try:
             self.detail = detail
+            print("detail", detail)
             error = CustomErrors.objects.get(code=error_code)
+            print(error)
             self.status_code = error.status_code
             serializer = ErrorSerializer(error)
+            print(serializer.data)
             self.error = serializer.data
+
             
         except Exception as e:
             print("exception ", e)
